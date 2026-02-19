@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TeleDrive Dashboard</title>
+    <style>
+      body { font-family: Arial, sans-serif; margin: 0; background: #f5f7fb; color: #1a1a1a; }
+      header { background: #1f2a44; color: #fff; padding: 12px 16px; display: flex; justify-content: space-between; }
+      .layout { display: grid; grid-template-columns: 240px 1fr; gap: 12px; padding: 12px; }
+      .panel { background: #fff; border: 1px solid #d6deeb; border-radius: 6px; padding: 10px; }
+      .main { display: grid; gap: 12px; }
+      table { width: 100%; border-collapse: collapse; }
+      th, td { border-bottom: 1px solid #e5e9f2; padding: 6px; font-size: 13px; text-align: left; }
+      button { padding: 6px 10px; margin: 2px; }
+      .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+      input, select { padding: 6px; }
+      pre { margin: 0; white-space: pre-wrap; max-height: 180px; overflow: auto; background: #0d1117; color: #c9d1d9; padding: 8px; }
+      .muted { font-size: 12px; color: #555; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <strong>TeleDrive</strong>
+      <div>
+        Session: <span id="sessionStatus">unknown</span>
+        | Last Resync: <span id="lastResync">never</span>
+      </div>
+    </header>
+
+    <div class="layout">
+      <section class="panel">
+        <h3>Folder Panel</h3>
+        <div class="row">
+          <input id="newFolderName" placeholder="new folder" />
+          <button id="createFolderBtn">Create</button>
+        </div>
+        <ul id="folderList"></ul>
+        <p class="muted">Folders are virtual and written to DB on uploads/resync records.</p>
+      </section>
+
+      <main class="main">
+        <section class="panel">
+          <h3>Upload Panel</h3>
+          <div class="row">
+            <input id="uploadFile" type="file" />
+            <select id="uploadFolder"></select>
+            <button id="uploadBtn">Upload</button>
+            <button id="refreshBtn">Refresh</button>
+          </div>
+        </section>
+
+        <section class="panel">
+          <h3>File Table</h3>
+          <table>
+            <thead>
+              <tr>
+                <th>ID</th><th>Name</th><th>Size</th><th>Folder</th><th>Uploaded</th><th>Status</th><th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="filesTableBody"></tbody>
+          </table>
+        </section>
+
+        <section class="panel">
+          <h3>Queue Panel</h3>
+          <button id="refreshQueueBtn">Refresh Queue</button>
+          <table>
+            <thead><tr><th>ID</th><th>File</th><th>Status</th><th>Updated</th><th>Action</th></tr></thead>
+            <tbody id="queueTableBody"></tbody>
+          </table>
+        </section>
+
+        <section class="panel">
+          <h3>Error Log Panel</h3>
+          <button id="copyErrorBtn">Copy error</button>
+          <pre id="errorLog">No errors.</pre>
+        </section>
+      </main>
+    </div>
+
+    <script>
+      const state = { folders: new Set(['root']), lastError: 'No errors.' };
+
+      function setError(err) {
+        const text = typeof err === 'string' ? err : JSON.stringify(err, null, 2);
+        state.lastError = text;
+        document.getElementById('errorLog').textContent = text;
+      }
+
+      function renderFolders() {
+        const folderList = document.getElementById('folderList');
+        const uploadFolder = document.getElementById('uploadFolder');
+        folderList.innerHTML = '';
+        uploadFolder.innerHTML = '';
+        [...state.folders].sort().forEach((name) => {
+          const li = document.createElement('li');
+          li.textContent = name;
+          folderList.appendChild(li);
+          const option = document.createElement('option');
+          option.value = name;
+          option.textContent = name;
+          uploadFolder.appendChild(option);
+        });
+      }
+
+      async function api(path, options = {}) {
+        const res = await fetch(path, options);
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw data;
+        return data;
+      }
+
+      async function refreshStatus() {
+        try {
+          const status = await api('/api/auth/status');
+          document.getElementById('sessionStatus').textContent = status.connected ? 'connected' : 'disconnected';
+        } catch (err) {
+          setError(err);
+        }
+      }
+
+      async function refreshFiles() {
+        try {
+          const data = await api('/api/files?page=1&limit=100');
+          const tbody = document.getElementById('filesTableBody');
+          tbody.innerHTML = '';
+          data.items.forEach((file) => {
+            state.folders.add(file.virtual_folder || 'root');
+            const tr = document.createElement('tr');
+            tr.innerHTML = `
+              <td>${file.id}</td>
+              <td>${file.file_name || ''}</td>
+              <td>${file.file_size || ''}</td>
+              <td>${file.virtual_folder || 'root'}</td>
+              <td>${file.uploaded_at || ''}</td>
+              <td>${file.upload_status || ''}</td>
+              <td>
+                <button data-download="${file.id}">Download</button>
+                <button data-delete="${file.id}">Delete</button>
+              </td>
+            `;
+            tbody.appendChild(tr);
+          });
+          renderFolders();
+        } catch (err) {
+          setError(err);
+        }
+      }
+
+      async function refreshQueue() {
+        try {
+          const data = await api('/api/queue');
+          const tbody = document.getElementById('queueTableBody');
+          tbody.innerHTML = '';
+          data.items.forEach((job) => {
+            const tr = document.createElement('tr');
+            tr.innerHTML = `
+              <td>${job.id}</td><td>${job.file_name || ''}</td><td>${job.status || ''}</td><td>${job.updated_at || ''}</td>
+              <td>${job.status === 'failed' ? `<button data-retry="${job.id}">Retry</button>` : ''}</td>
+            `;
+            tbody.appendChild(tr);
+          });
+        } catch (err) {
+          setError(err);
+        }
+      }
+
+      async function uploadSelected() {
+        const input = document.getElementById('uploadFile');
+        const folder = document.getElementById('uploadFolder').value || 'root';
+        const file = input.files[0];
+        if (!file) { setError('Select a file first'); return; }
+        if (file.size > 2 * 1024 * 1024 * 1024) {
+          setError({ error_code: 'FILE_TOO_LARGE', message: 'File exceeds maximum allowed size of 2 GB.', technical: `size_bytes=${file.size}` });
+          return;
+        }
+        const form = new FormData();
+        form.append('file', file);
+        form.append('folder', folder);
+        try {
+          await api('/api/files/upload', { method: 'POST', body: form });
+          input.value = '';
+          await refreshQueue();
+          await refreshFiles();
+        } catch (err) {
+          setError(err);
+        }
+      }
+
+      async function runIncrementalResync() {
+        try {
+          const result = await api('/api/files/resync', { method: 'POST' });
+          document.getElementById('lastResync').textContent = result.last_resync_at || 'done';
+          await refreshFiles();
+        } catch (err) { setError(err); }
+      }
+
+      async function runFullResync() {
+        try {
+          const result = await api('/api/files/resync-full', { method: 'POST' });
+          document.getElementById('lastResync').textContent = result.last_resync_at || 'done';
+          await refreshFiles();
+        } catch (err) { setError(err); }
+      }
+
+      document.getElementById('refreshBtn').addEventListener('click', async () => { await refreshFiles(); await refreshQueue(); await refreshStatus(); });
+      document.getElementById('refreshQueueBtn').addEventListener('click', refreshQueue);
+      document.getElementById('uploadBtn').addEventListener('click', uploadSelected);
+      document.getElementById('copyErrorBtn').addEventListener('click', async () => { await navigator.clipboard.writeText(state.lastError); });
+      document.getElementById('createFolderBtn').addEventListener('click', () => {
+        const name = document.getElementById('newFolderName').value.trim();
+        if (!name) return;
+        state.folders.add(name);
+        document.getElementById('newFolderName').value = '';
+        renderFolders();
+      });
+
+      document.getElementById('filesTableBody').addEventListener('click', async (event) => {
+        const downloadId = event.target.getAttribute('data-download');
+        const deleteId = event.target.getAttribute('data-delete');
+        if (downloadId) {
+          window.location.href = `/api/files/${downloadId}/download`;
+        }
+        if (deleteId) {
+          try {
+            await api(`/api/files/${deleteId}`, { method: 'DELETE' });
+            await refreshFiles();
+          } catch (err) { setError(err); }
+        }
+      });
+
+      document.getElementById('queueTableBody').addEventListener('click', async (event) => {
+        const retryId = event.target.getAttribute('data-retry');
+        if (!retryId) return;
+        try {
+          await api(`/api/queue/${retryId}/retry`, { method: 'POST' });
+          await refreshQueue();
+        } catch (err) { setError(err); }
+      });
+
+      const tools = document.createElement('div');
+      tools.className = 'panel';
+      tools.innerHTML = '<h3>Resync</h3><button id="resyncBtn">Incremental Resync</button><button id="resyncFullBtn">Full Resync</button>';
+      document.querySelector('.main').appendChild(tools);
+      document.getElementById('resyncBtn').addEventListener('click', runIncrementalResync);
+      document.getElementById('resyncFullBtn').addEventListener('click', runFullResync);
+
+      (async function init() {
+        renderFolders();
+        await refreshStatus();
+        await refreshFiles();
+        await refreshQueue();
+      })();
+    </script>
+  </body>
+</html>
