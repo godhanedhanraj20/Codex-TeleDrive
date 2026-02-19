@@ -1,73 +1,64 @@
-# Draft: Localhost “TeleDrive” App (Pyrogram + Telegram Saved Messages)
+# Draft: Localhost “TeleDrive” App (Pyrogram User Session + Telegram Saved Messages)
 
 ## Short answer
-Yes — this is very doable.
+Yes — this is very doable **if implemented as a Telegram user client** (Pyrogram user session), not as a bot.
 
-A simple localhost app can use **Telegram Saved Messages as storage**:
-- Upload a file from your PC → send it to your own Saved Messages chat.
-- List files by scanning your Saved Messages history.
-- Download any file back to your PC.
-
-This works like a lightweight personal cloud (Google Drive-style basics), with some trade-offs.
+A localhost app can use **Saved Messages as private storage**:
+- Upload file from your PC → send to your own Saved Messages (`chat_id="me"`).
+- Index files locally in SQLite for fast listing/search.
+- Download files back with streaming.
 
 ---
 
-## 1) Product idea (MVP)
+## 1) Product scope (corrected MVP)
 
 ### Goal
-Build a local web app (`http://localhost:8000`) that lets one user:
-1. Authenticate with Telegram (via Pyrogram).
-2. Upload files.
-3. View file list (name, size, date, message id).
-4. Download files.
-5. Optionally delete files.
+Build a local web app (`http://127.0.0.1:8000`) for one user that can:
+1. Sign in to Telegram using Pyrogram user auth (phone + OTP + optional 2FA password).
+2. Upload files to Saved Messages.
+3. List/search files from local index.
+4. Download files (streaming response).
+5. Delete files and resync index.
 
-### What “Saved Messages as storage” means
-- Every upload is a Telegram message containing a document/video/audio/photo.
-- Metadata (filename, size, tags) can be inferred from message + optionally persisted in a small local DB.
+### Critical constraint
+- **Saved Messages requires a user session.** Do not use Bot API token flow for storage in Saved Messages.
 
 ---
 
 ## 2) Suggested stack
 
 - **Backend:** Python + FastAPI
-- **Telegram client:** Pyrogram
-- **Frontend:** Simple HTML + JS (or Jinja templates first)
-- **Local DB:** SQLite (for fast indexing/search, optional but recommended)
-- **Server:** Uvicorn
-
-Why this stack:
-- FastAPI gives quick REST endpoints and easy localhost usage.
-- Pyrogram handles upload/download to Telegram cleanly.
-- SQLite avoids rescanning all messages on every page load.
+- **Telegram layer:** Pyrogram **user client** wrapper
+- **Frontend:** HTML/JS (or Jinja templates)
+- **DB:** SQLite
+- **Server:** Uvicorn bound to `127.0.0.1`
+- **Background jobs:** asyncio queue + worker(s)
 
 ---
 
 ## 3) Core architecture
 
-### Components
-1. **Web API Layer**
-   - `/auth/start`, `/auth/verify`
-   - `/files/upload`
-   - `/files` (list/search)
-   - `/files/{id}/download`
-   - `/files/{id}` (delete)
+1. **API layer**
+   - Auth endpoints (`/api/auth/*`)
+   - File endpoints (`/api/files/*`)
+   - Queue/progress endpoints (`/api/queue/*`)
 
-2. **Telegram Service Layer (Pyrogram wrapper)**
-   - `send_document` for uploads
-   - `get_messages` / history scan for indexing
-   - `download_media` for downloads
-   - `delete_messages` for deletion
+2. **Telegram service layer (Pyrogram user session)**
+   - `send_document("me", ...)` for upload
+   - `iter_history("me")` for resync/index rebuild
+   - `download_media(...)` for download path/chunk flow
+   - `delete_messages("me", ...)` for delete
 
-3. **Index Layer (SQLite)**
-   - Store mapping: `telegram_message_id -> file metadata`
-   - Fields: id, file_name, file_size, mime_type, upload_date, tg_message_id, file_unique_id
+3. **Queue layer (rate-limited worker)**
+   - Uploads are enqueued and processed sequentially (default concurrency: 1)
+   - FloodWait-aware retries (sleep Telegram-provided seconds)
 
-4. **Frontend**
-   - One-page dashboard:
-     - Upload form
-     - File table with Download/Delete buttons
-     - Search input
+4. **Index layer (SQLite)**
+   - Message-to-file metadata map
+   - Dedupe + reuse via Telegram `file_id`
+
+5. **Frontend**
+   - Upload panel, file table, queue status, retry/error visibility
 
 ---
 
@@ -78,83 +69,111 @@ CREATE TABLE files (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   tg_message_id INTEGER NOT NULL UNIQUE,
   tg_chat_id INTEGER NOT NULL,
-  file_unique_id TEXT,
-  file_id TEXT,
+  remote_file_id TEXT,        -- Telegram file_id (reusable for re-send)
+  file_unique_id TEXT,        -- Stable-ish Telegram file unique id
   file_name TEXT,
   mime_type TEXT,
   file_size INTEGER,
+  parts INTEGER DEFAULT 1,    -- >1 when chunk-splitting used
+  upload_status TEXT NOT NULL DEFAULT 'uploaded', -- queued/uploaded/failed/deleted
   uploaded_at TEXT NOT NULL,
-  local_tag TEXT,
+  last_synced_at TEXT,
   checksum TEXT
 );
 
 CREATE INDEX idx_files_name ON files(file_name);
 CREATE INDEX idx_files_uploaded_at ON files(uploaded_at);
+CREATE INDEX idx_files_unique ON files(file_unique_id);
 ```
 
 ---
 
-## 5) MVP flow
+## 5) Upload/download constraints and policy
 
-1. User opens localhost app.
-2. If no session exists, app asks for Telegram login (phone + OTP, maybe 2FA password).
-3. User uploads a file.
-4. Backend sends file to Saved Messages using Pyrogram.
-5. Backend stores metadata in SQLite.
-6. File appears in list.
-7. User clicks download; backend streams from Telegram to browser.
+### File size policy
+- Enforce max upload size of ~2 GB per Telegram file.
+- Validate both client-side and server-side.
+- If file >2 GB:
+  - Option A (MVP): reject with clear message.
+  - Option B: split into `.partNNN` chunks + manifest and upload parts.
 
----
+### Rate-limit policy
+- All uploads go through queue.
+- On FloodWait / TooManyRequests:
+  - sleep for server-provided wait seconds,
+  - retry with capped retry count,
+  - surface retry ETA in UI.
 
-## 6) Key technical concerns
-
-1. **Large file limits**
-   - Telegram has size limits depending on account/app capabilities.
-   - Need clear UI errors for oversize files.
-
-2. **Rate limits / flood waits**
-   - Bulk operations can trigger Telegram flood waits.
-   - Add retry/backoff and queue uploads.
-
-3. **Session security**
-   - Pyrogram session file must be protected.
-   - For local app: store session in app directory with strict permissions.
-
-4. **Index sync**
-   - DB can drift if messages are deleted from Telegram directly.
-   - Add “Resync” button to rebuild index from Saved Messages history.
-
-5. **Privacy/security**
-   - Localhost only by default (`127.0.0.1`).
-   - Optional app passcode to open UI.
+### Download policy
+- Return FastAPI `StreamingResponse`.
+- Avoid loading whole file in memory.
+- Use temp file/chunk streaming for large files and cleanup after completion.
 
 ---
 
-## 7) Suggested API draft
+## 6) API draft (updated)
 
+### Auth
 - `POST /api/auth/send-code`
 - `POST /api/auth/sign-in`
 - `POST /api/auth/check-password`
+
+### Files
 - `GET /api/files?search=&page=`
-- `POST /api/files/upload`
-- `GET /api/files/{id}/download`
+- `POST /api/files/upload` → returns `queued` job
+- `GET /api/files/{id}/download` → streaming response
 - `DELETE /api/files/{id}`
-- `POST /api/files/resync`
+- `POST /api/files/resync` (incremental)
+- `POST /api/files/resync-full` (full rebuild)
+
+### Queue/Jobs
+- `GET /api/files/queued`
+- `GET /api/queue/{job_id}`
+
+### Optional split support
+- `POST /api/files/split`
+- `POST /api/files/assemble`
 
 ---
 
-## 8) Minimal folder structure
+## 7) Sync strategy
+
+### Incremental resync (default)
+- Track latest processed timestamp/message id.
+- Scan newer history only.
+- Upsert records using `tg_message_id`, `remote_file_id`, `file_unique_id`.
+
+### Full resync (manual)
+- Paginate entire Saved Messages history.
+- Rebuild/repair local index.
+- Mark missing records as deleted/drifted.
+
+---
+
+## 8) Security baseline
+
+- Bind app to `127.0.0.1` by default.
+- Store Pyrogram session file with strict permissions.
+- Protect secrets (`api_id`, `api_hash`) via env vars + optional OS keychain/encryption.
+- Optional app passcode before showing dashboard.
+- Conservative operation rate to reduce account risk.
+
+---
+
+## 9) Minimal folder structure
 
 ```text
 teledrive/
   app/
-    main.py              # FastAPI entry
-    telegram_client.py   # Pyrogram wrapper
-    db.py                # sqlite setup + queries
-    models.py            # pydantic schemas
+    main.py
+    telegram_client.py      # Pyrogram user client wrapper
+    queue_worker.py         # rate-limited job worker
+    db.py
+    models.py
     routes/
       auth.py
       files.py
+      queue.py
     static/
       app.js
       styles.css
@@ -169,47 +188,28 @@ teledrive/
 
 ---
 
-## 9) Phase plan
+## 10) Phased plan
 
-### Phase 1 (1–2 days)
-- Telegram auth
-- Upload + list + download
-- Basic UI
+### Phase 1 (MVP)
+- Pyrogram user auth flow
+- Queued upload/list/download/delete
+- 2GB limit enforcement
+- Basic incremental resync
 
 ### Phase 2
-- Delete support
-- Search/sort/pagination
-- Resync index
+- FloodWait metrics + better queue visibility
+- Full resync and drift markers
+- `file_id` reuse for duplicate uploads
 
 ### Phase 3
-- Upload queue + progress bars
-- Folder/tag abstraction (virtual folders in DB)
-- Share/export metadata
+- Optional >2GB split/reassemble flow
+- Range/resumable downloads
+- Better metadata/tags/virtual folders
 
 ---
 
-## 10) Honest comparison with Google Drive
+## 11) Final recommendation
 
-### Good
-- Simple personal cloud behavior
-- Works with your existing Telegram account
-- No extra infra costs for basic personal usage
+Keep scope tight: single-user localhost, user-session auth, queue-backed uploads, streaming downloads, and robust resync.
 
-### Not the same as Drive
-- No native folder tree (must emulate in metadata)
-- Telegram constraints (rate limits, file rules)
-- Not ideal for team collaboration/versioning
-
----
-
-## 11) Recommendation
-
-Start with a strict MVP:
-- single-user localhost app,
-- Saved Messages only,
-- upload/list/download/delete,
-- SQLite index + resync.
-
-If this feels smooth, then add virtual folders and better UX.
-
-This keeps scope realistic and gives a working “personal TeleDrive” quickly.
+This gives a practical “personal TeleDrive” without pretending to be full Google Drive parity.
