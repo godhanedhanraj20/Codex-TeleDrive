@@ -126,16 +126,31 @@ class TelegramClient:
         if not self._started:
             return {"connected": False, "user": None}
 
-        me = await self._require_client().get_me()
-        return {
-            "connected": True,
-            "user": {
-                "id": me.id,
-                "name": " ".join(part for part in [me.first_name, me.last_name] if part).strip() or me.username,
-                "username": me.username,
-                "phone_number": me.phone_number,
-            },
-        }
+        try:
+            me = await self._require_client().get_me()
+            return {
+                "connected": True,
+                "user": {
+                    "id": me.id,
+                    "name": " ".join(part for part in [me.first_name, me.last_name] if part).strip() or me.username,
+                    "username": me.username,
+                    "phone_number": me.phone_number,
+                },
+            }
+        except Exception as exc:
+            if "AUTH_KEY_UNREGISTERED" not in str(exc):
+                raise
+            LOGGER.warning(
+                "Detected unregistered Telegram auth key; resetting Pyrogram session files",
+                extra={"session_file": "data/teledrive.session"},
+            )
+            if self._client is not None and getattr(self._client, "is_connected", False):
+                await self._client.disconnect()
+            self._started = False
+            self._client = None
+            Path("data/teledrive.session").unlink(missing_ok=True)
+            Path("data/teledrive.session-journal").unlink(missing_ok=True)
+            return {"connected": False, "user": None}
 
     async def upload_file(self, path: str, caption: str | None = None) -> Message:
         return await self._require_client().send_document("me", path, caption=caption)
