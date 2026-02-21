@@ -138,8 +138,20 @@ class TelegramClient:
                 },
             }
         except Exception as exc:
-            if "AUTH_KEY_UNREGISTERED" not in str(exc):
+            technical = str(exc)
+            technical_upper = technical.upper()
+
+            if "SESSION_PASSWORD_NEEDED" in technical_upper:
+                LOGGER.info("Telegram session requires 2FA password completion")
+                return {
+                    "connected": False,
+                    "user": None,
+                    "requires_password": True,
+                }
+
+            if "AUTH_KEY_UNREGISTERED" not in technical_upper:
                 raise
+
             LOGGER.warning(
                 "Detected unregistered Telegram auth key; resetting Pyrogram session files",
                 extra={"session_file": "data/teledrive.session"},
