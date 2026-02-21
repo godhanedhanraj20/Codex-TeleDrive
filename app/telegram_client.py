@@ -139,8 +139,9 @@ class TelegramClient:
             }
         except Exception as exc:
             technical = str(exc)
+            technical_upper = technical.upper()
 
-            if "SESSION_PASSWORD_NEEDED" in technical:
+            if "SESSION_PASSWORD_NEEDED" in technical_upper:
                 LOGGER.info("Telegram session requires 2FA password completion")
                 return {
                     "connected": False,
@@ -148,7 +149,7 @@ class TelegramClient:
                     "requires_password": True,
                 }
 
-            if "AUTH_KEY_UNREGISTERED" not in technical:
+            if "AUTH_KEY_UNREGISTERED" not in technical_upper:
                 raise
 
             LOGGER.warning(
