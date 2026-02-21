@@ -7,39 +7,73 @@
     <style>
       body { font-family: Arial, sans-serif; margin: 0; background: #f5f7fb; color: #1a1a1a; }
       header { background: #1f2a44; color: #fff; padding: 12px 16px; display: flex; justify-content: space-between; }
-      .layout { display: grid; grid-template-columns: 240px 1fr; gap: 12px; padding: 12px; }
+      .layout { display: grid; grid-template-columns: 260px 1fr; gap: 12px; padding: 12px; }
       .panel { background: #fff; border: 1px solid #d6deeb; border-radius: 6px; padding: 10px; }
       .main { display: grid; gap: 12px; }
       table { width: 100%; border-collapse: collapse; }
       th, td { border-bottom: 1px solid #e5e9f2; padding: 6px; font-size: 13px; text-align: left; }
       button { padding: 6px 10px; margin: 2px; }
       .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-      input, select { padding: 6px; }
+      input, select { padding: 6px; min-width: 120px; }
       pre { margin: 0; white-space: pre-wrap; max-height: 180px; overflow: auto; background: #0d1117; color: #c9d1d9; padding: 8px; }
       .muted { font-size: 12px; color: #555; }
+      .badge { padding: 2px 8px; border-radius: 10px; font-size: 12px; }
+      .connected { background: #d1fae5; color: #065f46; }
+      .disconnected { background: #fee2e2; color: #991b1b; }
+      .disabled { opacity: 0.55; pointer-events: none; }
+      .auth-block { border-top: 1px dashed #d6deeb; padding-top: 8px; margin-top: 8px; }
+      .full { width: 100%; }
     </style>
   </head>
   <body>
     <header>
       <strong>TeleDrive</strong>
       <div>
-        Session: <span id="sessionStatus">unknown</span>
+        Session:
+        <span id="sessionStatus" class="badge disconnected">disconnected</span>
         | Last Resync: <span id="lastResync">never</span>
       </div>
     </header>
 
     <div class="layout">
       <section class="panel">
+        <h3>Login</h3>
+        <div class="row">
+          <input id="phoneInput" class="full" placeholder="+91xxxxxxxxxx" />
+        </div>
+        <div class="row">
+          <button id="sendCodeBtn">1) Send code</button>
+        </div>
+        <div class="auth-block">
+          <div class="row">
+            <input id="phoneCodeHashInput" class="full" placeholder="phone_code_hash" />
+          </div>
+          <div class="row">
+            <input id="otpCodeInput" class="full" placeholder="OTP code" />
+          </div>
+          <div class="row">
+            <button id="signInBtn">2) Sign in</button>
+          </div>
+        </div>
+        <div class="auth-block">
+          <div class="row">
+            <input id="passwordInput" class="full" type="password" placeholder="2FA password (if required)" />
+          </div>
+          <div class="row">
+            <button id="checkPasswordBtn">3) Check password</button>
+          </div>
+        </div>
+        <p class="muted">You must complete Telegram login before upload/download/delete actions.</p>
+
         <h3>Folder Panel</h3>
         <div class="row">
           <input id="newFolderName" placeholder="new folder" />
           <button id="createFolderBtn">Create</button>
         </div>
         <ul id="folderList"></ul>
-        <p class="muted">Folders are virtual and written to DB on uploads/resync records.</p>
       </section>
 
-      <main class="main">
+      <main class="main" id="mainApp">
         <section class="panel">
           <h3>Upload Panel</h3>
           <div class="row">
@@ -72,6 +106,12 @@
         </section>
 
         <section class="panel">
+          <h3>Resync</h3>
+          <button id="resyncBtn">Incremental Resync</button>
+          <button id="resyncFullBtn">Full Resync</button>
+        </section>
+
+        <section class="panel">
           <h3>Error Log Panel</h3>
           <button id="copyErrorBtn">Copy error</button>
           <pre id="errorLog">No errors.</pre>
@@ -80,24 +120,37 @@
     </div>
 
     <script>
-      const state = { folders: new Set(['root']), lastError: 'No errors.' };
+      const state = {
+        folders: new Set(["root"]),
+        lastError: "No errors.",
+        connected: false,
+      };
 
       function setError(err) {
-        const text = typeof err === 'string' ? err : JSON.stringify(err, null, 2);
+        const text = typeof err === "string" ? err : JSON.stringify(err, null, 2);
         state.lastError = text;
-        document.getElementById('errorLog').textContent = text;
+        document.getElementById("errorLog").textContent = text;
+      }
+
+      function setConnected(connected, user = null) {
+        state.connected = connected;
+        const badge = document.getElementById("sessionStatus");
+        badge.textContent = connected ? `connected${user?.name ? ` (${user.name})` : ""}` : "disconnected";
+        badge.className = `badge ${connected ? "connected" : "disconnected"}`;
+
+        document.getElementById("mainApp").classList.toggle("disabled", !connected);
       }
 
       function renderFolders() {
-        const folderList = document.getElementById('folderList');
-        const uploadFolder = document.getElementById('uploadFolder');
-        folderList.innerHTML = '';
-        uploadFolder.innerHTML = '';
+        const folderList = document.getElementById("folderList");
+        const uploadFolder = document.getElementById("uploadFolder");
+        folderList.innerHTML = "";
+        uploadFolder.innerHTML = "";
         [...state.folders].sort().forEach((name) => {
-          const li = document.createElement('li');
+          const li = document.createElement("li");
           li.textContent = name;
           folderList.appendChild(li);
-          const option = document.createElement('option');
+          const option = document.createElement("option");
           option.value = name;
           option.textContent = name;
           uploadFolder.appendChild(option);
@@ -113,8 +166,64 @@
 
       async function refreshStatus() {
         try {
-          const status = await api('/api/auth/status');
-          document.getElementById('sessionStatus').textContent = status.connected ? 'connected' : 'disconnected';
+          const status = await api("/api/auth/status");
+          setConnected(Boolean(status.connected), status.user || null);
+          return status;
+        } catch (err) {
+          setConnected(false);
+          setError(err);
+          return { connected: false };
+        }
+      }
+
+      async function sendCode() {
+        try {
+          const phone = document.getElementById("phoneInput").value.trim();
+          if (!phone) throw { message: "Phone is required" };
+
+          const data = await api("/api/auth/send-code", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ phone }),
+          });
+          document.getElementById("phoneCodeHashInput").value = data.phone_code_hash || "";
+          setError("Code sent. Enter OTP and sign in.");
+        } catch (err) {
+          setError(err);
+        }
+      }
+
+      async function signIn() {
+        try {
+          const phone = document.getElementById("phoneInput").value.trim();
+          const phone_code_hash = document.getElementById("phoneCodeHashInput").value.trim();
+          const code = document.getElementById("otpCodeInput").value.trim();
+          if (!phone || !phone_code_hash || !code) {
+            throw { message: "Phone, phone_code_hash, and OTP code are required" };
+          }
+
+          await api("/api/auth/sign-in", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ phone, phone_code_hash, code }),
+          });
+          await refreshAll();
+        } catch (err) {
+          setError(err);
+        }
+      }
+
+      async function checkPassword() {
+        try {
+          const password = document.getElementById("passwordInput").value;
+          if (!password) throw { message: "2FA password is required" };
+
+          await api("/api/auth/check-password", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ password }),
+          });
+          await refreshAll();
         } catch (err) {
           setError(err);
         }
@@ -122,19 +231,19 @@
 
       async function refreshFiles() {
         try {
-          const data = await api('/api/files?page=1&limit=100');
-          const tbody = document.getElementById('filesTableBody');
-          tbody.innerHTML = '';
+          const data = await api("/api/files?page=1&limit=100");
+          const tbody = document.getElementById("filesTableBody");
+          tbody.innerHTML = "";
           data.items.forEach((file) => {
-            state.folders.add(file.virtual_folder || 'root');
-            const tr = document.createElement('tr');
+            state.folders.add(file.virtual_folder || "root");
+            const tr = document.createElement("tr");
             tr.innerHTML = `
               <td>${file.id}</td>
-              <td>${file.file_name || ''}</td>
-              <td>${file.file_size || ''}</td>
-              <td>${file.virtual_folder || 'root'}</td>
-              <td>${file.uploaded_at || ''}</td>
-              <td>${file.upload_status || ''}</td>
+              <td>${file.file_name || ""}</td>
+              <td>${file.file_size || ""}</td>
+              <td>${file.virtual_folder || "root"}</td>
+              <td>${file.uploaded_at || ""}</td>
+              <td>${file.upload_status || ""}</td>
               <td>
                 <button data-download="${file.id}">Download</button>
                 <button data-delete="${file.id}">Delete</button>
@@ -150,14 +259,19 @@
 
       async function refreshQueue() {
         try {
-          const data = await api('/api/queue');
-          const tbody = document.getElementById('queueTableBody');
-          tbody.innerHTML = '';
+          const data = await api("/api/queue");
+          const tbody = document.getElementById("queueTableBody");
+          tbody.innerHTML = "";
           data.items.forEach((job) => {
-            const tr = document.createElement('tr');
+            const tr = document.createElement("tr");
             tr.innerHTML = `
-              <td>${job.id}</td><td>${job.file_name || ''}</td><td>${job.status || ''}</td><td>${job.updated_at || ''}</td>
-              <td>${job.status === 'failed' ? `<button data-retry="${job.id}">Retry</button>` : ''}</td>
+              <td>${job.id}</td>
+              <td>${job.file_name || ""}</td>
+              <td>${job.status || ""}</td>
+              <td>${job.updated_at || ""}</td>
+              <td>
+                ${job.status === "failed" ? `<button data-retry="${job.id}">Retry</button>` : ""}
+              </td>
             `;
             tbody.appendChild(tr);
           });
@@ -166,21 +280,20 @@
         }
       }
 
-      async function uploadSelected() {
-        const input = document.getElementById('uploadFile');
-        const folder = document.getElementById('uploadFolder').value || 'root';
-        const file = input.files[0];
-        if (!file) { setError('Select a file first'); return; }
-        if (file.size > 2 * 1024 * 1024 * 1024) {
-          setError({ error_code: 'FILE_TOO_LARGE', message: 'File exceeds maximum allowed size of 2 GB.', technical: `size_bytes=${file.size}` });
-          return;
-        }
-        const form = new FormData();
-        form.append('file', file);
-        form.append('folder', folder);
+      async function uploadSelectedFile() {
         try {
-          await api('/api/files/upload', { method: 'POST', body: form });
-          input.value = '';
+          const fileInput = document.getElementById("uploadFile");
+          const folder = document.getElementById("uploadFolder").value || "root";
+          const file = fileInput.files[0];
+          if (!file) throw { message: "Select a file first." };
+          if (file.size > 2 * 1024 * 1024 * 1024) throw { message: "File exceeds 2 GB limit." };
+
+          const form = new FormData();
+          form.append("file", file);
+          form.append("folder", folder);
+
+          await api("/api/files/upload", { method: "POST", body: form });
+          fileInput.value = "";
           await refreshQueue();
           await refreshFiles();
         } catch (err) {
@@ -188,70 +301,91 @@
         }
       }
 
-      async function runIncrementalResync() {
-        try {
-          const result = await api('/api/files/resync', { method: 'POST' });
-          document.getElementById('lastResync').textContent = result.last_resync_at || 'done';
-          await refreshFiles();
-        } catch (err) { setError(err); }
-      }
-
-      async function runFullResync() {
-        try {
-          const result = await api('/api/files/resync-full', { method: 'POST' });
-          document.getElementById('lastResync').textContent = result.last_resync_at || 'done';
-          await refreshFiles();
-        } catch (err) { setError(err); }
-      }
-
-      document.getElementById('refreshBtn').addEventListener('click', async () => { await refreshFiles(); await refreshQueue(); await refreshStatus(); });
-      document.getElementById('refreshQueueBtn').addEventListener('click', refreshQueue);
-      document.getElementById('uploadBtn').addEventListener('click', uploadSelected);
-      document.getElementById('copyErrorBtn').addEventListener('click', async () => { await navigator.clipboard.writeText(state.lastError); });
-      document.getElementById('createFolderBtn').addEventListener('click', () => {
-        const name = document.getElementById('newFolderName').value.trim();
-        if (!name) return;
-        state.folders.add(name);
-        document.getElementById('newFolderName').value = '';
-        renderFolders();
-      });
-
-      document.getElementById('filesTableBody').addEventListener('click', async (event) => {
-        const downloadId = event.target.getAttribute('data-download');
-        const deleteId = event.target.getAttribute('data-delete');
-        if (downloadId) {
-          window.location.href = `/api/files/${downloadId}/download`;
-        }
-        if (deleteId) {
-          try {
-            await api(`/api/files/${deleteId}`, { method: 'DELETE' });
-            await refreshFiles();
-          } catch (err) { setError(err); }
-        }
-      });
-
-      document.getElementById('queueTableBody').addEventListener('click', async (event) => {
-        const retryId = event.target.getAttribute('data-retry');
-        if (!retryId) return;
-        try {
-          await api(`/api/queue/${retryId}/retry`, { method: 'POST' });
-          await refreshQueue();
-        } catch (err) { setError(err); }
-      });
-
-      const tools = document.createElement('div');
-      tools.className = 'panel';
-      tools.innerHTML = '<h3>Resync</h3><button id="resyncBtn">Incremental Resync</button><button id="resyncFullBtn">Full Resync</button>';
-      document.querySelector('.main').appendChild(tools);
-      document.getElementById('resyncBtn').addEventListener('click', runIncrementalResync);
-      document.getElementById('resyncFullBtn').addEventListener('click', runFullResync);
-
-      (async function init() {
-        renderFolders();
-        await refreshStatus();
+      async function refreshAll() {
+        const status = await refreshStatus();
+        if (!status.connected) return;
         await refreshFiles();
         await refreshQueue();
-      })();
+      }
+
+      document.getElementById("sendCodeBtn").addEventListener("click", sendCode);
+      document.getElementById("signInBtn").addEventListener("click", signIn);
+      document.getElementById("checkPasswordBtn").addEventListener("click", checkPassword);
+
+      document.getElementById("createFolderBtn").addEventListener("click", () => {
+        const input = document.getElementById("newFolderName");
+        const value = input.value.trim();
+        if (value) {
+          state.folders.add(value);
+          renderFolders();
+          input.value = "";
+        }
+      });
+
+      document.getElementById("uploadBtn").addEventListener("click", uploadSelectedFile);
+      document.getElementById("refreshBtn").addEventListener("click", refreshAll);
+      document.getElementById("refreshQueueBtn").addEventListener("click", refreshQueue);
+
+      document.getElementById("resyncBtn").addEventListener("click", async () => {
+        try {
+          const data = await api("/api/files/resync", { method: "POST" });
+          document.getElementById("lastResync").textContent = data.last_resync_at || "just now";
+          await refreshFiles();
+        } catch (err) {
+          setError(err);
+        }
+      });
+
+      document.getElementById("resyncFullBtn").addEventListener("click", async () => {
+        try {
+          const data = await api("/api/files/resync-full", { method: "POST" });
+          document.getElementById("lastResync").textContent = data.last_resync_at || "just now";
+          await refreshFiles();
+        } catch (err) {
+          setError(err);
+        }
+      });
+
+      document.getElementById("copyErrorBtn").addEventListener("click", async () => {
+        try {
+          await navigator.clipboard.writeText(state.lastError);
+        } catch (err) {
+          setError(err);
+        }
+      });
+
+      document.getElementById("filesTableBody").addEventListener("click", async (event) => {
+        const downloadId = event.target.getAttribute("data-download");
+        const deleteId = event.target.getAttribute("data-delete");
+
+        try {
+          if (downloadId) {
+            window.location.href = `/api/files/${downloadId}/download`;
+          }
+          if (deleteId) {
+            await api(`/api/files/${deleteId}`, { method: "DELETE" });
+            await refreshFiles();
+          }
+        } catch (err) {
+          setError(err);
+        }
+      });
+
+      document.getElementById("queueTableBody").addEventListener("click", async (event) => {
+        const retryId = event.target.getAttribute("data-retry");
+        if (!retryId) return;
+
+        try {
+          await api(`/api/queue/${retryId}/retry`, { method: "POST" });
+          await refreshQueue();
+        } catch (err) {
+          setError(err);
+        }
+      });
+
+      renderFolders();
+      refreshAll();
+      setInterval(refreshStatus, 10000);
     </script>
   </body>
 </html>

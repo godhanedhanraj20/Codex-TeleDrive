@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 import os
+import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +12,7 @@ from pyrogram import Client
 from pyrogram.errors import FloodWait
 from pyrogram.types import Message
 
+LOGGER = logging.getLogger("teledrive.telegram_client")
 
 class TelegramClient:
     """Thin Pyrogram wrapper for single-account Saved Messages operations."""
@@ -49,11 +52,44 @@ class TelegramClient:
         return self._client
 
     async def start(self) -> None:
-        if not self._started:
-            if self._client is None:
-                self._client = self._build_client()
+        if self._started:
+            return
+
+        if self._client is None:
+            self._client = self._build_client()
+
+        try:
             await self._client.start()
             self._started = True
+            return
+        except sqlite3.OperationalError as exc:
+            if "no such table: version" not in str(exc):
+                raise
+
+            # Pyrogram stores its own SQLite schema in data/teledrive.session;
+            # if this file is partially initialized/corrupted, startup can fail with
+            # a missing internal "version" table error.
+            LOGGER.warning(
+                "Detected corrupted Pyrogram session schema; removing session files and retrying once",
+                extra={
+                    "error": str(exc),
+                    "session_file": "data/teledrive.session",
+                },
+            )
+
+            # Removing only the Pyrogram session files is safe: this does not touch
+            # TeleDrive's main metadata DB (data/teledrive.db).
+            Path("data/teledrive.session").unlink(missing_ok=True)
+            Path("data/teledrive.session-journal").unlink(missing_ok=True)
+
+            # Retry exactly once to avoid masking persistent/unrelated issues.
+            self._client = self._build_client()
+            try:
+                await self._client.start()
+                self._started = True
+                return
+            except Exception:
+                raise exc
 
     async def stop(self) -> None:
         if self._started:
