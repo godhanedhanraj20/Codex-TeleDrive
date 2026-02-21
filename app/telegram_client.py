@@ -58,8 +58,19 @@ class TelegramClient:
         if self._client is None:
             self._client = self._build_client()
 
+        # Use connect() (not start()) because start() triggers interactive terminal
+        # prompts when no authorization exists, which breaks API-driven auth flows.
+        if getattr(self._client, "is_connected", False):
+            self._started = True
+            return
+
         try:
-            await self._client.start()
+            await self._client.connect()
+            self._started = True
+            return
+        except ConnectionError as exc:
+            if "already connected" not in str(exc).lower():
+                raise
             self._started = True
             return
         except sqlite3.OperationalError as exc:
@@ -84,17 +95,14 @@ class TelegramClient:
 
             # Retry exactly once to avoid masking persistent/unrelated issues.
             self._client = self._build_client()
-            try:
-                await self._client.start()
-                self._started = True
-                return
-            except Exception:
-                raise exc
+            await self._client.connect()
+            self._started = True
 
     async def stop(self) -> None:
         if self._started:
             client = self._require_client()
-            await client.stop()
+            if getattr(client, "is_connected", False):
+                await client.disconnect()
             self._started = False
 
     async def send_code(self, phone: str) -> dict[str, Any]:
