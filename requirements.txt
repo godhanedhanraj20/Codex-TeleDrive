@@ -1,0 +1,6 @@
+fastapi
+uvicorn[standard]
+pyrogram
+aiofiles
+python-multipart
+pydantic
