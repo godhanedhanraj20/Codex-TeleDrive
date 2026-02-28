@@ -10,7 +10,7 @@ from pathlib import Path
 
 import aiofiles
 from fastapi import APIRouter, File, Form, Query, Request, UploadFile
-from starlette.background import BackgroundTask
+from fastapi.background import BackgroundTask
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from app import db
